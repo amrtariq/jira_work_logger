@@ -19,7 +19,7 @@ class JiraAssigneeReporter:
         self.jira_url = tk.StringVar()
         self.username = tk.StringVar()
         self.password = tk.StringVar()
-        self.project_key = tk.StringVar(value="PM")
+        self.project_key = tk.StringVar()
         self.start_date = tk.StringVar()
         self.end_date = tk.StringVar()
 
@@ -106,13 +106,13 @@ class JiraAssigneeReporter:
                         sprint_info = sprint_data.get('name', str(sprint_data))
                     elif isinstance(sprint_data, str):
                         # Extract sprint name from string format like "com.atlassian.greenhopper.service.sprint.Sprint@abc[id=123,rapidViewId=456,state=ACTIVE,name=Sprint 1,startDate=...]"
-                        sprint_match = re.search(r'name=([^,\]]+)', sprint_data)
+                        sprint_match = re.search(r'name=([^,]+)', sprint_data)
                         if sprint_match:
                             sprint_info = sprint_match.group(1)
                         else:
                             sprint_info = sprint_data
                 elif isinstance(field_value, str):
-                    sprint_match = re.search(r'name=([^,\]]+)', field_value)
+                    sprint_match = re.search(r'name=([^,]+)', field_value)
                     if sprint_match:
                         sprint_info = sprint_match.group(1)
                     else:
@@ -155,7 +155,6 @@ Compatible with Jira Cloud & Server/Data Center 11.0+."""
         ttk.Label(config_frame, text="Jira Server URL:").grid(row=0, column=0, sticky=tk.W, pady=5)
         jira_entry = ttk.Entry(config_frame, textvariable=self.jira_url, width=50)
         jira_entry.grid(row=0, column=1, sticky=(tk.W, tk.E), pady=5, padx=(10, 0))
-        jira_entry.insert(0, "https://originsglobal.atlassian.net")
 
         # Username
         ttk.Label(config_frame, text="Username/Email:").grid(row=1, column=0, sticky=tk.W, pady=5)
@@ -169,8 +168,18 @@ Compatible with Jira Cloud & Server/Data Center 11.0+."""
 
         # Project Key
         ttk.Label(config_frame, text="Project Key:").grid(row=3, column=0, sticky=tk.W, pady=5)
-        project_entry = ttk.Entry(config_frame, textvariable=self.project_key, width=50)
-        project_entry.grid(row=3, column=1, sticky=(tk.W, tk.E), pady=5, padx=(10, 0))
+        
+        project_frame = ttk.Frame(config_frame)
+        project_frame.grid(row=3, column=1, sticky=(tk.W, tk.E), pady=5, padx=(10, 0))
+        project_frame.columnconfigure(0, weight=1)
+
+        self.project_combo = ttk.Combobox(project_frame, textvariable=self.project_key, width=38, state="readonly")
+        self.project_combo.grid(row=0, column=0, sticky=(tk.W, tk.E))
+        self.project_combo['values'] = ["Get from all"]
+        self.project_combo.set("Get from all")
+
+        fetch_projects_btn = ttk.Button(project_frame, text="Fetch Projects", command=self.fetch_projects)
+        fetch_projects_btn.grid(row=0, column=1, padx=(5, 0))
 
         # Date Range
         date_frame = ttk.Frame(config_frame)
@@ -241,6 +250,32 @@ Compatible with Jira Cloud & Server/Data Center 11.0+."""
         thread.daemon = True
         thread.start()
 
+    def fetch_projects(self):
+        """Fetch projects from Jira"""
+        if not self.jira_url.get() or not self.username.get() or not self.password.get():
+            messagebox.showerror("Error", "Please enter Jira URL, Username, and API Token first.")
+            return
+
+        try:
+            self.update_progress("Fetching projects...")
+            auth = HTTPBasicAuth(self.username.get(), self.password.get())
+            headers = {'Accept': 'application/json'}
+            url = f"{self.jira_url.get().rstrip('/')}/rest/api/3/project"
+            
+            response = requests.get(url, headers=headers, auth=auth, timeout=30)
+
+            if response.status_code != 200:
+                raise Exception(f"Failed to fetch projects: {response.status_code} - {response.text}")
+
+            projects = response.json()
+            project_keys = ["Get from all"] + sorted([project['key'] for project in projects])
+            
+            self.project_combo['values'] = project_keys
+            self.update_progress(f"Found {len(projects)} projects.")
+
+        except Exception as e:
+            self.show_error(str(e))
+
     def validate_inputs(self):
         """Validate user inputs"""
         if not self.jira_url.get():
@@ -253,7 +288,7 @@ Compatible with Jira Cloud & Server/Data Center 11.0+."""
             messagebox.showerror("Error", "Please enter password/API token")
             return False
         if not self.project_key.get():
-            messagebox.showerror("Error", "Please enter project key")
+            messagebox.showerror("Error", "Please select a project or 'Get from all'")
             return False
 
         # Validate dates
@@ -279,7 +314,11 @@ Compatible with Jira Cloud & Server/Data Center 11.0+."""
             }
 
             # Build JQL query
-            jql = f'project = "{self.project_key.get()}" AND created >= "{self.start_date.get()}" AND created <= "{self.end_date.get()}"'
+            project_jql = ""
+            if self.project_key.get() != "Get from all":
+                project_jql = f'project = "{self.project_key.get()}" AND '
+            
+            jql = f'{project_jql}created >= "{self.start_date.get()}" AND created <= "{self.end_date.get()}"'
 
             # Use the enhanced JQL search endpoint
             self.update_progress("Searching for issues...")
@@ -295,7 +334,7 @@ Compatible with Jira Cloud & Server/Data Center 11.0+."""
                     'jql': jql,
                     'maxResults': max_results,
                     'fields': '*all',  # Get all fields including custom fields for sprint detection
-                    'expand': 'changelog'
+                    'expand': 'changelog,worklog'
                 }
 
                 if next_page_token:
@@ -352,6 +391,14 @@ Compatible with Jira Cloud & Server/Data Center 11.0+."""
                     # Extract Sprint information
                     sprint_info = self.extract_sprint_info(fields)
 
+                    # Calculate total logged time
+                    total_logged_seconds = 0
+                    if 'worklog' in fields and fields['worklog'] and 'worklogs' in fields['worklog']:
+                        for worklog in fields['worklog']['worklogs']:
+                            total_logged_seconds += worklog.get('timeSpentSeconds', 0)
+                    
+                    logged_time_hours = total_logged_seconds / 3600
+
                     # Process assignee changes
                     assignee_history = self.process_assignee_changes_from_issue(issue)
 
@@ -367,7 +414,10 @@ Compatible with Jira Cloud & Server/Data Center 11.0+."""
                             'Parent': parent_key,
                             'Sprint': sprint_info,
                             'Start Date': assignee_info['start_date'],
-                            'End Date': assignee_info['end_date']
+                            'End Date': assignee_info['end_date'],
+                            'Before Status': assignee_info['Before Status'],
+                            'After Status': assignee_info['After Status'],
+                            'Logged Time (Hours)': round(logged_time_hours, 2)
                         })
 
                     if (i + 1) % 10 == 0:
@@ -387,8 +437,6 @@ Compatible with Jira Cloud & Server/Data Center 11.0+."""
     def process_assignee_changes_from_issue(self, issue_data):
         """Process assignee changes from issue data including changelog"""
         assignee_changes = []
-
-        # Get all assignee changes from changelog
         changelog = issue_data.get('changelog', {})
         if 'histories' in changelog:
             for history in changelog['histories']:
@@ -399,45 +447,77 @@ Compatible with Jira Cloud & Server/Data Center 11.0+."""
                             'from': item.get('fromString'),
                             'to': item.get('toString')
                         })
-
-        # Sort by date
         assignee_changes.sort(key=lambda x: x['date'])
 
-        # Build assignee periods
-        assignee_periods = []
+        status_history = [{'date': issue_data['fields']['created'], 'status': issue_data['fields']['status']['name']}]
+        if 'histories' in changelog:
+            for history in changelog['histories']:
+                for item in history.get('items', []):
+                    if item.get('field') == 'status':
+                        status_history.append({'date': history['created'], 'status': item.get('toString')})
+        status_history.sort(key=lambda x: x['date'])
 
+        def get_status_at_date(date_str):
+            if not date_str:
+                return status_history[-1]['status'] if status_history else ''
+            
+            last_status = status_history[0]['status']
+            for change in status_history:
+                if change['date'][:10] <= date_str:
+                    last_status = change['status']
+                else:
+                    break
+            return last_status
+
+        status_change_date = None
+        if 'histories' in changelog:
+            for history in sorted(changelog['histories'], key=lambda x: x['created']):
+                for item in history.get('items', []):
+                    if item.get('field') == 'status' and item.get('toString', '').lower() in ['done', 'fixed']:
+                        status_change_date = history['created'][:10]
+        
+        resolution_date = issue_data['fields'].get('resolutiondate', '')[:10] if issue_data['fields'].get('resolutiondate') else None
+        
+        final_end_date = resolution_date or status_change_date or ""
+
+        assignee_periods = []
         if not assignee_changes:
-            # No assignee changes, check current assignee
             current_assignee = issue_data['fields'].get('assignee')
             if current_assignee:
-                assignee_name = current_assignee.get('displayName', 
-                                                   current_assignee.get('name', 'Unknown'))
+                assignee_name = current_assignee.get('displayName', current_assignee.get('name', 'Unknown'))
+                start_date = issue_data['fields']['created'][:10]
+                end_date = final_end_date
+                before_status = get_status_at_date(start_date)
+                after_status = get_status_at_date(end_date)
                 assignee_periods.append({
                     'assignee': assignee_name,
-                    'start_date': issue_data['fields']['created'][:10],
-                    'end_date': (issue_data['fields'].get('resolutiondate', '')[:10] 
-                               if issue_data['fields'].get('resolutiondate') else '')
+                    'start_date': start_date,
+                    'end_date': end_date,
+                    'Before Status': before_status,
+                    'After Status': after_status
                 })
         else:
-            # Process assignee changes
             for i, change in enumerate(assignee_changes):
                 assignee = change['to']
-                if not assignee:  # Skip null assignments
+                if not assignee:
                     continue
 
                 start_date = change['date'][:10]
 
-                # Find end date (next change or resolution)
                 if i + 1 < len(assignee_changes):
                     end_date = assignee_changes[i + 1]['date'][:10]
                 else:
-                    end_date = (issue_data['fields'].get('resolutiondate', '')[:10] 
-                              if issue_data['fields'].get('resolutiondate') else '')
+                    end_date = final_end_date
+                
+                before_status = get_status_at_date(start_date)
+                after_status = get_status_at_date(end_date)
 
                 assignee_periods.append({
                     'assignee': assignee,
                     'start_date': start_date,
-                    'end_date': end_date
+                    'end_date': end_date,
+                    'Before Status': before_status,
+                    'After Status': after_status
                 })
 
         return assignee_periods
@@ -462,11 +542,14 @@ Compatible with Jira Cloud & Server/Data Center 11.0+."""
             # Show first few records with enhanced info
             for i, row in enumerate(self.report_data[:3]):
                 results_msg += f"{i+1}. {row['Issue Key']} ({row['Type']}) - {row['Assignee']}\n"
+                results_msg += f"    Status: {row['Before Status']} -> {row['After Status']}\n"
                 results_msg += f"    Dates: {row['Start Date']} to {row['End Date']}\n"
                 if row['Parent']:
                     results_msg += f"    Parent: {row['Parent']}\n"
                 if row['Sprint']:
                     results_msg += f"    Sprint: {row['Sprint']}\n"
+                if row.get('Logged Time (Hours)', 0) > 0:
+                    results_msg += f"    Logged Time: {row['Logged Time (Hours)']} hours\n"
                 results_msg += "\n"
 
             if len(self.report_data) > 3:
@@ -511,7 +594,8 @@ Compatible with Jira Cloud & Server/Data Center 11.0+."""
                     # Enhanced fieldnames with new columns
                     fieldnames = [
                         'Assignee', 'Task Summary', 'Details', 'Project', 'Issue Key', 
-                        'Type', 'Parent', 'Sprint', 'Start Date', 'End Date'
+                        'Type', 'Parent', 'Sprint', 'Start Date', 'End Date',
+                        'Before Status', 'After Status', 'Logged Time (Hours)'
                     ]
                     writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
 
@@ -519,7 +603,7 @@ Compatible with Jira Cloud & Server/Data Center 11.0+."""
                     for row in self.report_data:
                         writer.writerow(row)
 
-                messagebox.showinfo("Success", f"Enhanced report saved successfully to:\n{filename}\n\nColumns: Assignee, Task Summary, Details, Project, Issue Key, Type, Parent, Sprint, Start Date, End Date")
+                messagebox.showinfo("Success", f"Enhanced report saved successfully to:\n{filename}\n\nColumns: Assignee, Task Summary, Details, Project, Issue Key, Type, Parent, Sprint, Start Date, End Date, Before Status, After Status, Logged Time (Hours)")
 
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to save file: {str(e)}")
