@@ -391,13 +391,17 @@ Compatible with Jira Cloud & Server/Data Center 11.0+."""
                     # Extract Sprint information
                     sprint_info = self.extract_sprint_info(fields)
 
-                    # Calculate total logged time
+                    # Calculate total logged time and get workloggers
                     total_logged_seconds = 0
+                    workloggers = []
                     if 'worklog' in fields and fields['worklog'] and 'worklogs' in fields['worklog']:
                         for worklog in fields['worklog']['worklogs']:
                             total_logged_seconds += worklog.get('timeSpentSeconds', 0)
+                            if 'author' in worklog and 'displayName' in worklog['author']:
+                                workloggers.append(worklog['author']['displayName'])
                     
                     logged_time_hours = total_logged_seconds / 3600
+                    unique_workloggers = ", ".join(sorted(list(set(workloggers))))
 
                     # Process assignee changes
                     assignee_history = self.process_assignee_changes_from_issue(issue)
@@ -406,6 +410,7 @@ Compatible with Jira Cloud & Server/Data Center 11.0+."""
                     for assignee_info in assignee_history:
                         self.report_data.append({
                             'Assignee': assignee_info['assignee'],
+                            'Worklogger': unique_workloggers,
                             'Task Summary': summary,
                             'Details': description[:200] + '...' if len(description) > 200 else description,
                             'Project': project,
@@ -542,6 +547,8 @@ Compatible with Jira Cloud & Server/Data Center 11.0+."""
             # Show first few records with enhanced info
             for i, row in enumerate(self.report_data[:3]):
                 results_msg += f"{i+1}. {row['Issue Key']} ({row['Type']}) - {row['Assignee']}\n"
+                if row['Worklogger']:
+                    results_msg += f"    Workloggers: {row['Worklogger']}\n"
                 results_msg += f"    Status: {row['Before Status']} -> {row['After Status']}\n"
                 results_msg += f"    Dates: {row['Start Date']} to {row['End Date']}\n"
                 if row['Parent']:
@@ -593,7 +600,7 @@ Compatible with Jira Cloud & Server/Data Center 11.0+."""
                 with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
                     # Enhanced fieldnames with new columns
                     fieldnames = [
-                        'Assignee', 'Task Summary', 'Details', 'Project', 'Issue Key', 
+                        'Assignee', 'Worklogger', 'Task Summary', 'Details', 'Project', 'Issue Key', 
                         'Type', 'Parent', 'Sprint', 'Start Date', 'End Date',
                         'Before Status', 'After Status', 'Logged Time (Hours)'
                     ]
@@ -603,7 +610,7 @@ Compatible with Jira Cloud & Server/Data Center 11.0+."""
                     for row in self.report_data:
                         writer.writerow(row)
 
-                messagebox.showinfo("Success", f"Enhanced report saved successfully to:\n{filename}\n\nColumns: Assignee, Task Summary, Details, Project, Issue Key, Type, Parent, Sprint, Start Date, End Date, Before Status, After Status, Logged Time (Hours)")
+                messagebox.showinfo("Success", f"Enhanced report saved successfully to:\n{filename}\n\nColumns: Assignee, Worklogger, Task Summary, Details, Project, Issue Key, Type, Parent, Sprint, Start Date, End Date, Before Status, After Status, Logged Time (Hours)")
 
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to save file: {str(e)}")
