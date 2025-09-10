@@ -123,6 +123,62 @@ class JiraAssigneeReporter:
 
         return sprint_info
 
+    def process_worklog_entries(self, issue_fields, assignee_info, base_issue_data):
+        """Process individual worklog entries and create separate rows for each"""
+        worklog_rows = []
+        
+        if 'worklog' in issue_fields and issue_fields['worklog'] and 'worklogs' in issue_fields['worklog']:
+            for worklog in issue_fields['worklog']['worklogs']:
+                # Extract worklog details
+                worklogger_name = ""
+                if 'author' in worklog and 'displayName' in worklog['author']:
+                    worklogger_name = worklog['author']['displayName']
+                elif 'author' in worklog and 'name' in worklog['author']:
+                    worklogger_name = worklog['author']['name']
+                
+                # Extract worklog time
+                time_spent_seconds = worklog.get('timeSpentSeconds', 0)
+                time_spent_hours = time_spent_seconds / 3600
+                
+                # Extract worklog date
+                worklog_date = worklog.get('started', '')[:10] if worklog.get('started') else ''
+                
+                # Extract worklog comment
+                worklog_comment = ""
+                if 'comment' in worklog and worklog['comment']:
+                    worklog_comment = self.extract_text_from_adf(worklog['comment'])
+                
+                # Create a new row for this worklog entry
+                worklog_row = base_issue_data.copy()
+                worklog_row.update({
+                    'Worklogger': worklogger_name,
+                    'Worklog Date': worklog_date,
+                    'Worklog Comment': worklog_comment[:200] + '...' if len(worklog_comment) > 200 else worklog_comment,
+                    'Logged Time (Hours)': round(time_spent_hours, 2),
+                    'Start Date': assignee_info['start_date'],
+                    'End Date': assignee_info['end_date'],
+                    'Before Status': assignee_info['Before Status'],
+                    'After Status': assignee_info['After Status']
+                })
+                worklog_rows.append(worklog_row)
+        
+        # If no worklogs found, create a single row with empty worklog data
+        if not worklog_rows:
+            worklog_row = base_issue_data.copy()
+            worklog_row.update({
+                'Worklogger': '',
+                'Worklog Date': '',
+                'Worklog Comment': '',
+                'Logged Time (Hours)': 0,
+                'Start Date': assignee_info['start_date'],
+                'End Date': assignee_info['end_date'],
+                'Before Status': assignee_info['Before Status'],
+                'After Status': assignee_info['After Status']
+            })
+            worklog_rows.append(worklog_row)
+        
+        return worklog_rows
+
     def create_widgets(self):
         # Main frame
         main_frame = ttk.Frame(self.root, padding="20")
@@ -139,8 +195,9 @@ class JiraAssigneeReporter:
         title_label.grid(row=0, column=0, columnspan=2, pady=(0, 20))
 
         # Instructions
-        instructions = """Enhanced CSV report with assignee history, issue types, parent issues, and sprints.
-For each task, shows who was assigned, when, plus issue type, parent, and sprint info.
+        instructions = """Enhanced CSV report with assignee history, individual worklog entries, issue types, parent issues, and sprints.
+For each task, shows who was assigned, when, plus individual worklog entries with dates, comments, and time spent.
+Each worklog entry creates a separate row for detailed tracking.
 Compatible with Jira Cloud & Server/Data Center 11.0+."""
 
         instructions_label = ttk.Label(main_frame, text=instructions, wraplength=600)
@@ -319,6 +376,9 @@ Compatible with Jira Cloud & Server/Data Center 11.0+."""
                 project_jql = f'project = "{self.project_key.get()}" AND '
             
             jql = f'{project_jql}created >= "{self.start_date.get()}" AND created <= "{self.end_date.get()}"'
+            
+            # Debug: Log the JQL query
+            self.update_progress(f"Searching with JQL: {jql}")
 
             # Use the enhanced JQL search endpoint
             self.update_progress("Searching for issues...")
@@ -358,8 +418,8 @@ Compatible with Jira Cloud & Server/Data Center 11.0+."""
                 self.update_progress(f"Found {len(all_issues)} issues so far...")
 
             if not all_issues:
-                self.update_progress("No issues found")
-                self.root.after(0, self.show_no_results)
+                self.update_progress("No issues found for the specified criteria")
+                self.root.after(0, lambda: self.show_no_results("No issues found for the specified date range and project criteria. Please check:\n- Date range is correct\n- Project key is valid\n- Issues exist in the specified time period"))
                 return
 
             self.update_progress(f"Processing {len(all_issues)} issues...")
@@ -391,47 +451,51 @@ Compatible with Jira Cloud & Server/Data Center 11.0+."""
                     # Extract Sprint information
                     sprint_info = self.extract_sprint_info(fields)
 
-                    # Calculate total logged time and get workloggers
-                    total_logged_seconds = 0
-                    workloggers = []
-                    if 'worklog' in fields and fields['worklog'] and 'worklogs' in fields['worklog']:
-                        for worklog in fields['worklog']['worklogs']:
-                            total_logged_seconds += worklog.get('timeSpentSeconds', 0)
-                            if 'author' in worklog and 'displayName' in worklog['author']:
-                                workloggers.append(worklog['author']['displayName'])
-                    
-                    logged_time_hours = total_logged_seconds / 3600
-                    unique_workloggers = ", ".join(sorted(list(set(workloggers))))
-
                     # Process assignee changes
                     assignee_history = self.process_assignee_changes_from_issue(issue)
 
-                    # Add to report data
-                    for assignee_info in assignee_history:
-                        self.report_data.append({
-                            'Assignee': assignee_info['assignee'],
-                            'Worklogger': unique_workloggers,
-                            'Task Summary': summary,
-                            'Details': description[:200] + '...' if len(description) > 200 else description,
-                            'Project': project,
-                            'Issue Key': issue_key,
-                            'Type': issue_type,
-                            'Parent': parent_key,
-                            'Sprint': sprint_info,
-                            'Start Date': assignee_info['start_date'],
-                            'End Date': assignee_info['end_date'],
-                            'Before Status': assignee_info['Before Status'],
-                            'After Status': assignee_info['After Status'],
-                            'Logged Time (Hours)': round(logged_time_hours, 2)
-                        })
+                    # Create base issue data
+                    base_issue_data = {
+                        'Assignee': '',
+                        'Worklogger': '',
+                        'Task Summary': summary,
+                        'Details': description[:200] + '...' if len(description) > 200 else description,
+                        'Project': project,
+                        'Issue Key': issue_key,
+                        'Type': issue_type,
+                        'Parent': parent_key,
+                        'Sprint': sprint_info,
+                        'Worklog Date': '',
+                        'Worklog Comment': '',
+                        'Logged Time (Hours)': 0
+                    }
 
+                    # Process each assignee period and create separate rows for each worklog entry
+                    for assignee_info in assignee_history:
+                        base_issue_data['Assignee'] = assignee_info['assignee']
+                        
+                        # Get worklog rows for this assignee period
+                        worklog_rows = self.process_worklog_entries(fields, assignee_info, base_issue_data)
+                        self.report_data.extend(worklog_rows)
+                        
+                    # Debug: Log assignee and worklog info
                     if (i + 1) % 10 == 0:
-                        self.update_progress(f"Processed {i + 1} of {len(all_issues)} issues...")
+                        total_worklog_rows = sum(len(self.process_worklog_entries(fields, assignee_info, base_issue_data)) for assignee_info in assignee_history)
+                        self.update_progress(f"Processed {i + 1} of {len(all_issues)} issues... (Found {len(assignee_history)} assignee periods, {total_worklog_rows} total worklog rows for {issue_key})")
 
                 except Exception as issue_error:
                     self.update_progress(f"Error processing issue {issue.get('key', 'Unknown')}: {str(issue_error)}")
                     continue
 
+            # Check if we have any report data
+            if not self.report_data:
+                self.update_progress("No assignee data found in the issues")
+                self.root.after(0, lambda: self.show_no_results("No assignee data found. This could mean:\n- Issues have no assignee history\n- Issues were never assigned to anyone\n- All assignee changes occurred outside the date range\n- Issues have no worklog entries"))
+                return
+            
+            # Debug: Show summary of what was found
+            self.update_progress(f"Processing complete. Found {len(self.report_data)} total rows from {len(all_issues)} issues")
+            
             # Update UI with results
             self.root.after(0, self.show_results)
 
@@ -548,7 +612,11 @@ Compatible with Jira Cloud & Server/Data Center 11.0+."""
             for i, row in enumerate(self.report_data[:3]):
                 results_msg += f"{i+1}. {row['Issue Key']} ({row['Type']}) - {row['Assignee']}\n"
                 if row['Worklogger']:
-                    results_msg += f"    Workloggers: {row['Worklogger']}\n"
+                    results_msg += f"    Worklogger: {row['Worklogger']}\n"
+                    if row['Worklog Date']:
+                        results_msg += f"    Worklog Date: {row['Worklog Date']}\n"
+                    if row['Worklog Comment']:
+                        results_msg += f"    Worklog Comment: {row['Worklog Comment'][:50]}...\n"
                 results_msg += f"    Status: {row['Before Status']} -> {row['After Status']}\n"
                 results_msg += f"    Dates: {row['Start Date']} to {row['End Date']}\n"
                 if row['Parent']:
@@ -568,10 +636,10 @@ Compatible with Jira Cloud & Server/Data Center 11.0+."""
         else:
             self.show_no_results()
 
-    def show_no_results(self):
+    def show_no_results(self, message="No assignee data found for the specified criteria."):
         self.progress_bar.stop()
         self.generate_btn.config(state='normal')
-        self.results_text.insert(tk.END, "No assignee data found for the specified criteria.\n")
+        self.results_text.insert(tk.END, message + "\n")
         self.progress_var.set("No data found")
 
     def show_error(self, error_msg):
@@ -598,10 +666,10 @@ Compatible with Jira Cloud & Server/Data Center 11.0+."""
         if filename:
             try:
                 with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
-                    # Enhanced fieldnames with new columns
+                    # Enhanced fieldnames with new worklog columns
                     fieldnames = [
                         'Assignee', 'Worklogger', 'Task Summary', 'Details', 'Project', 'Issue Key', 
-                        'Type', 'Parent', 'Sprint', 'Start Date', 'End Date',
+                        'Type', 'Parent', 'Sprint', 'Worklog Date', 'Worklog Comment', 'Start Date', 'End Date',
                         'Before Status', 'After Status', 'Logged Time (Hours)'
                     ]
                     writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
@@ -610,7 +678,7 @@ Compatible with Jira Cloud & Server/Data Center 11.0+."""
                     for row in self.report_data:
                         writer.writerow(row)
 
-                messagebox.showinfo("Success", f"Enhanced report saved successfully to:\n{filename}\n\nColumns: Assignee, Worklogger, Task Summary, Details, Project, Issue Key, Type, Parent, Sprint, Start Date, End Date, Before Status, After Status, Logged Time (Hours)")
+                messagebox.showinfo("Success", f"Enhanced report saved successfully to:\n{filename}\n\nColumns: Assignee, Worklogger, Task Summary, Details, Project, Issue Key, Type, Parent, Sprint, Worklog Date, Worklog Comment, Start Date, End Date, Before Status, After Status, Logged Time (Hours)")
 
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to save file: {str(e)}")
